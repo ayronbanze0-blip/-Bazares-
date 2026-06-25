@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="pt" data-theme="light">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Os meus produtos — Bazares</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;0,9..40,800&family=Fraunces:ital,opsz,wght@0,9..144,700;0,9..144,900;1,9..144,700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<header id="topbar"></header><div class="overlay" id="overlay"></div><aside id="sidebar" class="closed"></aside>
+<div id="main"><div id="view" class="pg-body"></div></div>
+<div id="modal-root"></div><div id="toast-root"></div>
+<script src="js/config.js"></script><script src="js/api.js"></script><script src="js/app.js"></script>
+<script>
+let _products=[], _page=1;
+
+initPage({ active:'my-products.html', requireAuth:true, roles:['SELLER'], onReady: async()=>{
+  document.getElementById('view').innerHTML=`
+    <div class="pg-hero">
+      <div class="pg-hero-content">
+        <div class="section-pill">📦 Catálogo</div>
+        <h1>Os meus Produtos</h1>
+        <p>Gerencie o seu catálogo de produtos</p>
+        <div class="pg-hero-actions">
+          <button class="btn btn-gold btn-sm" onclick="openAddModal()">+ Adicionar produto</button>
+        </div>
+      </div>
+    </div>
+    <div style="display:flex;gap:10px;margin-bottom:18px;flex-wrap:wrap">
+      <div style="position:relative;flex:1;min-width:160px">
+        <span style="position:absolute;left:14px;top:50%;transform:translateY(-50%);color:var(--t4)">🔍</span>
+        <input id="psrch" placeholder="Pesquisar produtos..." style="padding-left:40px;border-radius:var(--pill)">
+      </div>
+      <select id="pcat" style="width:180px;border-radius:var(--pill)"><option value="">Todas as categorias</option></select>
+      <button class="btn btn-primary btn-sm" onclick="openAddModal()">+ Produto</button>
+    </div>
+    <div id="prod-grid" class="p-grid"></div>
+    <div id="prod-pagination"></div>`;
+
+  const sel=document.getElementById('pcat');
+  CATS.forEach(c=>sel.insertAdjacentHTML('beforeend',`<option value="${esc(c.l)}">${esc(c.l)}</option>`));
+  let t;
+  document.getElementById('psrch').addEventListener('input',()=>{clearTimeout(t);t=setTimeout(()=>loadMyProducts(1),350);});
+  document.getElementById('pcat').addEventListener('change',()=>loadMyProducts(1));
+  await loadMyProducts(1);
+}});
+
+async function loadMyProducts(page=1){
+  _page=page;
+  const grid=document.getElementById('prod-grid');
+  grid.innerHTML=`<div style="text-align:center;padding:40px;grid-column:1/-1"><span class="spinner spinner-dark"></span></div>`;
+  const q=document.getElementById('psrch').value.trim();
+  const cat=document.getElementById('pcat').value;
+  try{
+    const res=await api.get('/products/mine',{q:q||undefined,category:cat||undefined,page,limit:24});
+    _products=res?.data?.products||[];
+    const meta=res?.data?.meta||{};
+    grid.innerHTML=_products.length?_products.map(myProductCard).join(''):`<div class="empty" style="grid-column:1/-1"><div class="empty-ico">📦</div><h3>Sem produtos ainda</h3><p>Adicione o seu primeiro produto</p><button class="btn btn-primary btn-sm" style="margin-top:14px" onclick="openAddModal()">+ Adicionar produto</button></div>`;
+    renderPagination('prod-pagination',meta,loadMyProducts);
+  } catch(e){ grid.innerHTML=`<div class="empty" style="grid-column:1/-1"><div class="empty-ico">⚠</div><h3>${esc(apiErrorMessage(e))}</h3></div>`; }
+}
+
+function myProductCard(p){
+  return `<div class="p-card">
+    <div class="p-img" onclick="go('product.html',{id:'${p.id}'})">
+      ${p.images?.[0]?.url?`<img src="${esc(p.images[0].url)}" alt="${esc(p.name)}" loading="lazy">`:`<span style="color:var(--t4);font-size:12px">Sem foto</span>`}
+    </div>
+    <div class="p-body">
+      <div class="p-name">${esc(p.name)}</div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:4px">
+        <div class="p-price">${fmtMT(p.price)}</div>
+        <span style="font-size:10px;font-weight:600;color:${p.stock>0?'var(--grn)':'var(--red)'}">${p.stock>0?p.stock+' un.':'Esgotado'}</span>
+      </div>
+      <div style="display:flex;gap:7px;margin-top:10px">
+        <button class="btn btn-soft btn-xs" style="flex:1" onclick="openEditModal('${p.id}')">✏ Editar</button>
+        <button class="btn btn-xs" style="flex:1;background:${p.stock>0?'var(--amber-bg,#FEF3C7)':'var(--grn-bg,#D1FAE5)'};color:${p.stock>0?'#92400E':'var(--grn)'}" onclick="toggleProductStock('${p.id}')">${p.stock>0?'📦 Esgotado':'✅ Disponível'}</button>
+        <button class="btn btn-xs" style="background:var(--red-bg);color:var(--red)" onclick="confirmDelete('${p.id}')">🗑</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+function openAddModal(){ buildProductModal(null); }
+function openEditModal(id){ const p=_products.find(x=>x.id===id); if(p) buildProductModal(p); }
+
+function buildProductModal(p){
+  const isEdit=!!p;
+  openModal(`
+    <div class="modal-hd"><h3>${isEdit?'Editar':'Adicionar'} Produto</h3><button class="modal-x" onclick="closeModal()">✕</button></div>
+    <div class="fg"><label>Nome do produto *</label><input id="pm-name" value="${esc(p?.name||'')}" placeholder="Nome do produto"></div>
+    <div class="fg"><label>Descrição *</label><textarea id="pm-desc" rows="3" placeholder="Descreva o produto...">${esc(p?.description||'')}</textarea></div>
+    <div class="row2">
+      <div class="fg"><label>Preço (MT) *</label><input type="number" id="pm-price" value="${p?.price||''}" min="0" step="0.01" placeholder="0"></div>
+      <div class="fg"><label>Stock</label><input type="number" id="pm-stock" value="${p?.stock??''}" min="0" placeholder="0"></div>
+    </div>
+    <div class="fg"><label>Categoria *</label>
+      <select id="pm-cat">${CATS.map(c=>`<option value="${esc(c.l)}"${p?.category===c.l?' selected':''}>${esc(c.l)}</option>`).join('')}</select>
+    </div>
+    <div class="row2">
+      <div class="fg"><label>Localização</label><input id="pm-loc" value="${esc(p?.location||'')}" placeholder="Ex: Maputo"></div>
+      <div class="fg"><label>Condição</label>
+        <select id="pm-cond">${['Novo','Usado - Bom estado','Usado - Estado razoável','Para peças'].map(v=>`<option${p?.condition===v?' selected':''}>${v}</option>`).join('')}</select>
+      </div>
+    </div>
+    <div class="row2">
+      <div class="fg"><label>Cor</label><input id="pm-color" value="${esc(p?.color||'')}" placeholder="Ex: Preto"></div>
+      <div class="fg"><label>Tamanho</label><input id="pm-size" value="${esc(p?.size||'')}" placeholder="Ex: M / 42"></div>
+    </div>
+    <div class="fg"><label>Método de entrega</label>
+      <select id="pm-del">${['Entrega ao domicílio','Recolha no local','Envio por correio','Combinado'].map(v=>`<option${p?.deliveryMethod===v?' selected':''}>${v}</option>`).join('')}</select>
+    </div>
+    <div class="fg"><label>URLs de imagens (uma por linha)</label>
+      <textarea id="pm-imgs" rows="3" placeholder="https://...">${(p?.images||[]).map(i=>i.url).join('\n')}</textarea>
+    </div>
+    <div style="display:flex;gap:9px;padding-top:4px">
+      <button class="btn btn-primary" style="flex:1" onclick="saveProduct(${isEdit?`'${p.id}'`:'null'})">${isEdit?'Guardar alterações':'Publicar produto'}</button>
+      <button class="btn btn-ghost" onclick="closeModal()">Cancelar</button>
+    </div>`,true);
+}
+
+async function saveProduct(id){
+  const name=document.getElementById('pm-name').value.trim();
+  const description=document.getElementById('pm-desc').value.trim();
+  const price=parseFloat(document.getElementById('pm-price').value);
+  const stock=parseInt(document.getElementById('pm-stock').value)||0;
+  const category=document.getElementById('pm-cat').value;
+  const location=document.getElementById('pm-loc').value.trim();
+  const condition=document.getElementById('pm-cond').value;
+  const color=document.getElementById('pm-color').value.trim();
+  const size=document.getElementById('pm-size').value.trim();
+  const deliveryMethod=document.getElementById('pm-del').value;
+  const imgLines=document.getElementById('pm-imgs').value.split('\n').map(s=>s.trim()).filter(Boolean);
+  const images=imgLines.map(url=>({url}));
+  if(!name||!description||!price||!category){toast('Preencha os campos obrigatórios (*).','warn');return;}
+  const btn=document.querySelector('#modal-root .btn-primary');
+  setLoading(btn,true);
+  try{
+    const body={name,description,price,stock,category,location,condition,color,size,deliveryMethod,images};
+    if(id) await api.put(`/products/${id}`,body); else await api.post('/products',body);
+    closeModal(); toast(id?'Produto actualizado!':'Produto publicado! 🎉'); await loadMyProducts(_page);
+  }catch(e){setLoading(btn,false);toast(apiErrorMessage(e),'err');}
+}
+
+async function toggleProductStock(id){
+  try{
+    await api.patch(`/products/${id}/stock`,{});
+    await loadMyProducts(_page);
+  }catch(e){ toast(apiErrorMessage(e),'err'); }
+}
+
+async function confirmDelete(id){
+  openModal(`<div class="modal-hd"><h3>Eliminar produto</h3><button class="modal-x" onclick="closeModal()">✕</button></div>
+    <p style="margin-bottom:20px">Tem a certeza que deseja eliminar este produto? Esta acção é irreversível.</p>
+    <div style="display:flex;gap:9px">
+      <button class="btn btn-danger" style="flex:1" onclick="deleteProduct('${id}')">Eliminar</button>
+      <button class="btn btn-ghost" onclick="closeModal()">Cancelar</button>
+    </div>`);
+}
+async function deleteProduct(id){
+  try{await api.delete(`/products/${id}`);closeModal();toast('Produto eliminado.','info');await loadMyProducts(_page);}
+  catch(e){toast(apiErrorMessage(e),'err');}
+}
+</script></body></html>
