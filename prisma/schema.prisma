@@ -1,1 +1,171 @@
+// Schema Prisma do BarberFlow.
+//
+// Por padrão usa SQLite (um único arquivo, sem serviço externo para
+// configurar — mesma filosofia do antigo db.json, mas agora com um banco
+// de verdade: transações, índices e integridade referencial).
+//
+// Para crescer, é só trocar o "provider" abaixo para "postgresql" ou
+// "mysql" e apontar DATABASE_URL para o servidor real — nenhum controller
+// precisa mudar.
+generator client {
+  provider = "prisma-client-js"
+}
 
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+/// Conta da barbearia (quem faz login no painel).
+model Barbeiro {
+  id            String   @id @default(uuid())
+  nome          String
+  nomeBarbearia String
+  slug          String   @unique
+  email         String   @unique
+  senhaHash     String
+  telefone      String   @default("")
+  endereco      String   @default("")
+  logoUrl       String   @default("")
+  corTema       String   @default("#C89B3C")
+  tema          String   @default("escuro")
+  /// Objeto com o expediente semanal (segunda..domingo -> {abre, fecha, fechado, pausas})
+  expediente    Json
+  /// { intervaloEntreSlots, antecedenciaMinimaMinutos }
+  config        Json
+  criadoEm      DateTime @default(now())
+  atualizadoEm  DateTime @updatedAt
+
+  funcionarios Funcionario[]
+  servicos     Servico[]
+  agendamentos Agendamento[]
+  clientes     Cliente[]
+  bloqueios    Bloqueio[]
+
+  @@map("barbeiros")
+}
+
+/// Profissional que trabalha na barbearia.
+model Funcionario {
+  id            String   @id @default(uuid())
+  barbeiroId    String
+  barbeiro      Barbeiro @relation(fields: [barbeiroId], references: [id], onDelete: Cascade)
+  nome          String
+  foto          String   @default("")
+  especialidade String   @default("")
+  telefone      String   @default("")
+  avaliacao     Float?
+  ativo         Boolean  @default(true)
+  /// Expediente próprio (opcional). Quando nulo, usa o expediente geral da barbearia.
+  expediente    Json?
+  /// Lista de datas (YYYY-MM-DD) de folga.
+  folgas        Json     @default("[]")
+  ordem         Int      @default(0)
+  criadoEm      DateTime @default(now())
+  atualizadoEm  DateTime @updatedAt
+
+  servicos     Servico[]
+  agendamentos Agendamento[]
+  bloqueios    Bloqueio[]
+
+  @@index([barbeiroId])
+  @@map("funcionarios")
+}
+
+/// Serviço oferecido pela barbearia (corte, barba, etc.).
+model Servico {
+  id             String       @id @default(uuid())
+  barbeiroId     String
+  barbeiro       Barbeiro     @relation(fields: [barbeiroId], references: [id], onDelete: Cascade)
+  funcionarioId  String?
+  funcionario    Funcionario? @relation(fields: [funcionarioId], references: [id], onDelete: SetNull)
+  nome           String
+  descricao      String       @default("")
+  preco          Float
+  duracaoMinutos Int
+  ativo          Boolean      @default(true)
+  ordem          Int          @default(0)
+  criadoEm       DateTime     @default(now())
+  atualizadoEm   DateTime     @updatedAt
+
+  agendamentos Agendamento[]
+
+  @@index([barbeiroId])
+  @@index([funcionarioId])
+  @@map("servicos")
+}
+
+/// Cliente da barbearia, identificado por (barbeiro + telefone normalizado).
+model Cliente {
+  id                  String   @id @default(uuid())
+  barbeiroId          String
+  barbeiro            Barbeiro @relation(fields: [barbeiroId], references: [id], onDelete: Cascade)
+  telefone            String
+  telefoneExibicao    String
+  nome                String
+  email               String   @default("")
+  totalAgendamentos   Int      @default(0)
+  totalGasto          Float    @default(0)
+  primeiroAgendamento DateTime @default(now())
+  ultimoAgendamento   DateTime @default(now())
+
+  @@unique([barbeiroId, telefone])
+  @@map("clientes")
+}
+
+/// Um agendamento (marcado manualmente pela barbearia ou pelo cliente via link público).
+model Agendamento {
+  id            String       @id @default(uuid())
+  barbeiroId    String
+  barbeiro      Barbeiro     @relation(fields: [barbeiroId], references: [id], onDelete: Cascade)
+  funcionarioId String?
+  funcionario   Funcionario? @relation(fields: [funcionarioId], references: [id], onDelete: SetNull)
+  servicoId     String?
+  servico       Servico?     @relation(fields: [servicoId], references: [id], onDelete: SetNull)
+
+  // Dados denormalizados do cliente/serviço no momento do agendamento,
+  // para manter o histórico legível mesmo se o cadastro original mudar/sumir.
+  clienteNome               String
+  clienteTelefone           String
+  clienteTelefoneNormalizado String
+  clienteEmail              String  @default("")
+  servicoNome                String
+  funcionarioNome             String?
+  preco                        Float
+  duracaoMinutos                Int
+
+  data       String // YYYY-MM-DD
+  horaInicio String // HH:mm
+  horaFim    String // HH:mm
+  status     String @default("pendente") // pendente | confirmado | concluido | cancelado
+  observacoes String @default("")
+  origem      String // manual | publico
+
+  criadoEm     DateTime @default(now())
+  atualizadoEm DateTime @updatedAt
+
+  @@index([barbeiroId, data])
+  @@index([barbeiroId, funcionarioId, data])
+  @@index([clienteTelefoneNormalizado])
+  @@map("agendamentos")
+}
+
+/// Bloqueio manual de horário (folga, feriado, etc.), pontual ou recorrente.
+model Bloqueio {
+  id            String       @id @default(uuid())
+  barbeiroId    String
+  barbeiro      Barbeiro     @relation(fields: [barbeiroId], references: [id], onDelete: Cascade)
+  funcionarioId String?
+  funcionario   Funcionario? @relation(fields: [funcionarioId], references: [id], onDelete: SetNull)
+  data          String? // YYYY-MM-DD, nulo quando recorrente
+  horaInicio    String
+  horaFim       String
+  diaTodo       Boolean  @default(false)
+  motivo        String   @default("Indisponível")
+  recorrente    Boolean  @default(false)
+  diaSemana     String? // segunda..domingo, usado quando recorrente
+  criadoEm      DateTime @default(now())
+
+  @@index([barbeiroId])
+  @@map("bloqueios")
+}
