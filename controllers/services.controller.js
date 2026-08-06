@@ -1,13 +1,17 @@
-const db = require('../config/db');
-const { gerarId } = require('../utils/id');
+const prisma = require('../config/prisma');
 const { ok, created, notFound, fail } = require('../utils/response');
 
 async function listar(req, res, next) {
   try {
-    const dados = db.ler();
-    const servicos = dados.servicos
-      .filter((s) => s.barbeiroId === req.barbeiro.id)
-      .sort((a, b) => a.ordem - b.ordem);
+    const { funcionarioId } = req.query;
+
+    const where = { barbeiroId: req.barbeiro.id };
+    if (funcionarioId) {
+      // Serviços genéricos (sem funcionário específico) + os exclusivos deste funcionário
+      where.OR = [{ funcionarioId: null }, { funcionarioId }];
+    }
+
+    const servicos = await prisma.servico.findMany({ where, orderBy: { ordem: 'asc' } });
     return ok(res, servicos, 'Serviços carregados.');
   } catch (err) {
     next(err);
@@ -16,28 +20,26 @@ async function listar(req, res, next) {
 
 async function criar(req, res, next) {
   try {
-    const { nome, descricao, preco, duracaoMinutos } = req.body;
+    const { nome, descricao, preco, duracaoMinutos, funcionarioId } = req.body;
     if (!nome || preco == null || !duracaoMinutos) {
       return fail(res, 'Informe nome, preço e duração do serviço.', 422);
     }
 
-    const dados = db.ler();
-    const totalAtual = dados.servicos.filter((s) => s.barbeiroId === req.barbeiro.id).length;
+    const totalAtual = await prisma.servico.count({ where: { barbeiroId: req.barbeiro.id } });
 
-    const novo = {
-      id: gerarId(),
-      barbeiroId: req.barbeiro.id,
-      nome,
-      descricao: descricao || '',
-      preco: Number(preco),
-      duracaoMinutos: Number(duracaoMinutos),
-      ativo: true,
-      ordem: totalAtual,
-      criadoEm: new Date().toISOString(),
-    };
+    const novo = await prisma.servico.create({
+      data: {
+        barbeiroId: req.barbeiro.id,
+        funcionarioId: funcionarioId || null, // null = disponível para qualquer funcionário
+        nome,
+        descricao: descricao || '',
+        preco: Number(preco),
+        duracaoMinutos: Number(duracaoMinutos),
+        ativo: true,
+        ordem: totalAtual,
+      },
+    });
 
-    dados.servicos.push(novo);
-    await db.escrever(dados);
     return created(res, novo, 'Serviço criado.');
   } catch (err) {
     next(err);
@@ -47,17 +49,20 @@ async function criar(req, res, next) {
 async function atualizar(req, res, next) {
   try {
     const { id } = req.params;
-    const dados = db.ler();
-    const servico = dados.servicos.find((s) => s.id === id && s.barbeiroId === req.barbeiro.id);
-    if (!servico) return notFound(res, 'Serviço não encontrado.');
 
-    const camposPermitidos = ['nome', 'descricao', 'preco', 'duracaoMinutos', 'ativo', 'ordem'];
+    const camposPermitidos = ['nome', 'descricao', 'preco', 'duracaoMinutos', 'ativo', 'ordem', 'funcionarioId'];
+    const dadosAtualizados = {};
     for (const campo of camposPermitidos) {
-      if (req.body[campo] !== undefined) servico[campo] = req.body[campo];
+      if (req.body[campo] !== undefined) dadosAtualizados[campo] = req.body[campo];
     }
-    servico.atualizadoEm = new Date().toISOString();
 
-    await db.escrever(dados);
+    const { count } = await prisma.servico.updateMany({
+      where: { id, barbeiroId: req.barbeiro.id },
+      data: dadosAtualizados,
+    });
+    if (count === 0) return notFound(res, 'Serviço não encontrado.');
+
+    const servico = await prisma.servico.findUnique({ where: { id } });
     return ok(res, servico, 'Serviço atualizado.');
   } catch (err) {
     next(err);
@@ -67,12 +72,8 @@ async function atualizar(req, res, next) {
 async function remover(req, res, next) {
   try {
     const { id } = req.params;
-    const dados = db.ler();
-    const indice = dados.servicos.findIndex((s) => s.id === id && s.barbeiroId === req.barbeiro.id);
-    if (indice === -1) return notFound(res, 'Serviço não encontrado.');
-
-    dados.servicos.splice(indice, 1);
-    await db.escrever(dados);
+    const { count } = await prisma.servico.deleteMany({ where: { id, barbeiroId: req.barbeiro.id } });
+    if (count === 0) return notFound(res, 'Serviço não encontrado.');
     return ok(res, null, 'Serviço removido.');
   } catch (err) {
     next(err);

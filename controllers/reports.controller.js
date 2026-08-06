@@ -1,4 +1,4 @@
-const db = require('../config/db');
+const prisma = require('../config/prisma');
 const { ok, fail } = require('../utils/response');
 
 async function resumo(req, res, next) {
@@ -6,10 +6,9 @@ async function resumo(req, res, next) {
     const { de, ate } = req.query;
     if (!de || !ate) return fail(res, 'Informe o período (de/ate).', 422);
 
-    const dados = db.ler();
-    const agendamentos = dados.agendamentos.filter(
-      (a) => a.barbeiroId === req.barbeiro.id && a.data >= de && a.data <= ate
-    );
+    const agendamentos = await prisma.agendamento.findMany({
+      where: { barbeiroId: req.barbeiro.id, data: { gte: de, lte: ate } },
+    });
 
     const concluidos = agendamentos.filter((a) => a.status === 'concluido');
     const cancelados = agendamentos.filter((a) => a.status === 'cancelado');

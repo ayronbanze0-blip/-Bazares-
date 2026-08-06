@@ -1,5 +1,4 @@
-const db = require('../config/db');
-const { gerarId } = require('../utils/id');
+const prisma = require('../config/prisma');
 const { ok, created, notFound, fail } = require('../utils/response');
 const {
   diaDaSemana, paraMinutos, paraHHmm, intervalosSeSobrepoe,
@@ -7,30 +6,71 @@ const {
 } = require('../utils/date');
 const { normalizarTelefone, registrarOuAtualizarCliente } = require('./clients.controller');
 
+const STATUS_OCUPA_HORARIO = ['pendente', 'confirmado', 'concluido'];
+
 /**
  * Retorna todos os intervalos já ocupados numa data para um barbeiro:
  * agendamentos ativos + bloqueios manuais (incluindo recorrentes que caem no dia).
+ *
+ * Quando `funcionarioId` é informado, considera apenas os agendamentos/bloqueios
+ * desse funcionário específico + bloqueios gerais da barbearia (sem funcionário
+ * definido). Sem `funcionarioId`, mantém o comportamento antigo: escopo por
+ * barbearia inteira (barbearias que não usam funcionários cadastrados).
  */
-function obterIntervalosOcupados(dados, barbeiroId, dataISO) {
-  const ocupados = dados.agendamentos
-    .filter((a) => a.barbeiroId === barbeiroId && a.data === dataISO && ['pendente', 'confirmado', 'concluido'].includes(a.status))
-    .map((a) => ({ inicio: a.horaInicio, fim: a.horaFim, tipo: 'agendamento' }));
+async function obterIntervalosOcupados(barbeiroId, dataISO, funcionarioId = null, tx = prisma) {
+  const ondeAgendamentos = { barbeiroId, data: dataISO, status: { in: STATUS_OCUPA_HORARIO } };
+  if (funcionarioId) ondeAgendamentos.funcionarioId = funcionarioId;
 
+  const agendamentos = await tx.agendamento.findMany({ where: ondeAgendamentos });
+  const ocupados = agendamentos.map((a) => ({ inicio: a.horaInicio, fim: a.horaFim, tipo: 'agendamento' }));
+
+  const ondeBloqueios = { barbeiroId };
+  if (funcionarioId) ondeBloqueios.OR = [{ funcionarioId: null }, { funcionarioId }];
+
+  const bloqueios = await tx.bloqueio.findMany({ where: ondeBloqueios });
   const diaSemana = diaDaSemana(dataISO);
 
-  dados.bloqueios
-    .filter((b) => b.barbeiroId === barbeiroId)
-    .forEach((b) => {
-      const aplicaHoje = (b.recorrente && b.diaSemana === diaSemana) || (!b.recorrente && b.data === dataISO);
-      if (aplicaHoje) ocupados.push({ inicio: b.horaInicio, fim: b.horaFim, tipo: 'bloqueio', motivo: b.motivo });
-    });
+  bloqueios.forEach((b) => {
+    const aplicaHoje = (b.recorrente && b.diaSemana === diaSemana) || (!b.recorrente && b.data === dataISO);
+    if (aplicaHoje) ocupados.push({ inicio: b.horaInicio, fim: b.horaFim, tipo: 'bloqueio', motivo: b.motivo });
+  });
 
   return ocupados;
 }
 
+/**
+ * Cria um agendamento validando conflito de horário dentro de uma transação
+ * real do banco, evitando condição de corrida quando dois clientes tentam
+ * reservar o mesmo horário ao mesmo tempo.
+ */
+async function criarAgendamentoSeguro(barbeiroId, dadosAgendamento) {
+  return prisma.$transaction(async (tx) => {
+    const { data, horaInicio, horaFim, funcionarioId } = dadosAgendamento;
+
+    const ondeConflito = { barbeiroId, data, status: { in: STATUS_OCUPA_HORARIO } };
+    if (funcionarioId) ondeConflito.funcionarioId = funcionarioId;
+
+    const candidatos = await tx.agendamento.findMany({ where: ondeConflito });
+    const conflito = candidatos.some((a) =>
+      intervalosSeSobrepoe(
+        paraMinutos(horaInicio), paraMinutos(horaFim),
+        paraMinutos(a.horaInicio), paraMinutos(a.horaFim)
+      )
+    );
+
+    if (conflito) {
+      const erro = new Error('Este horário acabou de ser reservado. Escolha outro horário.');
+      erro.status = 409;
+      throw erro;
+    }
+
+    return tx.agendamento.create({ data: { barbeiroId, ...dadosAgendamento } });
+  });
+}
+
 async function listar(req, res, next) {
   try {
-    const { visao = 'dia', data, status } = req.query;
+    const { visao = 'dia', data, status, funcionarioId } = req.query;
     const barbeiroId = req.barbeiro.id;
 
     let de = data;
@@ -45,13 +85,16 @@ async function listar(req, res, next) {
       de = inicio; ate = fim;
     }
 
-    const dados = db.ler();
-    let agendamentos = dados.agendamentos.filter((a) => a.barbeiroId === barbeiroId);
-    if (de) agendamentos = agendamentos.filter((a) => a.data >= de);
-    if (ate) agendamentos = agendamentos.filter((a) => a.data <= ate);
-    if (status) agendamentos = agendamentos.filter((a) => a.status === status);
+    const where = { barbeiroId };
+    if (de) where.data = { ...(where.data || {}), gte: de };
+    if (ate) where.data = { ...(where.data || {}), lte: ate };
+    if (status) where.status = status;
+    if (funcionarioId) where.funcionarioId = funcionarioId;
 
-    agendamentos.sort((a, b) => (a.data + a.horaInicio).localeCompare(b.data + b.horaInicio));
+    const agendamentos = await prisma.agendamento.findMany({
+      where,
+      orderBy: [{ data: 'asc' }, { horaInicio: 'asc' }],
+    });
 
     return ok(res, agendamentos, 'Agendamentos carregados.');
   } catch (err) {
@@ -59,48 +102,24 @@ async function listar(req, res, next) {
   }
 }
 
-/**
- * Cria um agendamento validando conflito de horário dentro de uma "transação"
- * (fila serializada do db.js), evitando condição de corrida quando dois
- * clientes tentam reservar o mesmo horário ao mesmo tempo.
- */
-async function criarAgendamentoSeguro(barbeiroId, dadosAgendamento) {
-  return db.transacao((dados) => {
-    const { data, horaInicio, horaFim } = dadosAgendamento;
-
-    const conflito = dados.agendamentos.some((a) => {
-      if (a.barbeiroId !== barbeiroId || a.data !== data) return false;
-      if (!['pendente', 'confirmado', 'concluido'].includes(a.status)) return false;
-      return intervalosSeSobrepoe(
-        paraMinutos(horaInicio), paraMinutos(horaFim),
-        paraMinutos(a.horaInicio), paraMinutos(a.horaFim)
-      );
-    });
-
-    if (conflito) {
-      const erro = new Error('Este horário acabou de ser reservado. Escolha outro horário.');
-      erro.status = 409;
-      throw erro;
-    }
-
-    const novo = { id: gerarId(), barbeiroId, ...dadosAgendamento };
-    dados.agendamentos.push(novo);
-    return novo;
-  });
-}
-
 async function criarManual(req, res, next) {
   try {
     const barbeiroId = req.barbeiro.id;
-    const { clienteNome, clienteTelefone, clienteEmail, servicoId, data, horaInicio, observacoes } = req.body;
+    const { clienteNome, clienteTelefone, clienteEmail, servicoId, data, horaInicio, observacoes, funcionarioId } = req.body;
 
     if (!clienteNome || !clienteTelefone || !servicoId || !data || !horaInicio) {
       return fail(res, 'Preencha cliente, serviço, data e horário.', 422);
     }
 
-    const dadosAtuais = db.ler();
-    const servico = dadosAtuais.servicos.find((s) => s.id === servicoId && s.barbeiroId === barbeiroId);
+    const servico = await prisma.servico.findFirst({ where: { id: servicoId, barbeiroId } });
     if (!servico) return notFound(res, 'Serviço não encontrado.');
+
+    let funcionarioNome = null;
+    if (funcionarioId) {
+      const funcionario = await prisma.funcionario.findFirst({ where: { id: funcionarioId, barbeiroId } });
+      if (!funcionario) return notFound(res, 'Funcionário não encontrado.');
+      funcionarioNome = funcionario.nome;
+    }
 
     const horaFim = paraHHmm(paraMinutos(horaInicio) + servico.duracaoMinutos);
 
@@ -111,13 +130,14 @@ async function criarManual(req, res, next) {
       clienteEmail: clienteEmail || '',
       servicoId,
       servicoNome: servico.nome,
+      funcionarioId: funcionarioId || null,
+      funcionarioNome,
       preco: servico.preco,
       duracaoMinutos: servico.duracaoMinutos,
       data, horaInicio, horaFim,
       status: 'confirmado',
       observacoes: observacoes || '',
       origem: 'manual',
-      criadoEm: new Date().toISOString(),
     };
 
     const agendamento = await criarAgendamentoSeguro(barbeiroId, novo);
@@ -137,14 +157,13 @@ async function atualizarStatus(req, res, next) {
     const statusValidos = ['pendente', 'confirmado', 'concluido', 'cancelado'];
     if (!statusValidos.includes(status)) return fail(res, 'Status inválido.', 422);
 
-    const dados = db.ler();
-    const agendamento = dados.agendamentos.find((a) => a.id === id && a.barbeiroId === req.barbeiro.id);
-    if (!agendamento) return notFound(res, 'Agendamento não encontrado.');
+    const { count } = await prisma.agendamento.updateMany({
+      where: { id, barbeiroId: req.barbeiro.id },
+      data: { status },
+    });
+    if (count === 0) return notFound(res, 'Agendamento não encontrado.');
 
-    agendamento.status = status;
-    agendamento.atualizadoEm = new Date().toISOString();
-    await db.escrever(dados);
-
+    const agendamento = await prisma.agendamento.findUnique({ where: { id } });
     return ok(res, agendamento, 'Status atualizado.');
   } catch (err) {
     next(err);
@@ -157,8 +176,8 @@ async function reagendar(req, res, next) {
     const { data, horaInicio } = req.body;
     if (!data || !horaInicio) return fail(res, 'Informe nova data e horário.', 422);
 
-    const resultado = await db.transacao((dados) => {
-      const agendamento = dados.agendamentos.find((a) => a.id === id && a.barbeiroId === req.barbeiro.id);
+    const resultado = await prisma.$transaction(async (tx) => {
+      const agendamento = await tx.agendamento.findFirst({ where: { id, barbeiroId: req.barbeiro.id } });
       if (!agendamento) {
         const erro = new Error('Agendamento não encontrado.');
         erro.status = 404;
@@ -167,11 +186,13 @@ async function reagendar(req, res, next) {
 
       const horaFim = paraHHmm(paraMinutos(horaInicio) + agendamento.duracaoMinutos);
 
-      const conflito = dados.agendamentos.some((a) => {
-        if (a.id === id || a.barbeiroId !== req.barbeiro.id || a.data !== data) return false;
-        if (!['pendente', 'confirmado', 'concluido'].includes(a.status)) return false;
-        return intervalosSeSobrepoe(paraMinutos(horaInicio), paraMinutos(horaFim), paraMinutos(a.horaInicio), paraMinutos(a.horaFim));
-      });
+      const ondeConflito = { barbeiroId: req.barbeiro.id, data, status: { in: STATUS_OCUPA_HORARIO }, id: { not: id } };
+      if (agendamento.funcionarioId) ondeConflito.funcionarioId = agendamento.funcionarioId;
+
+      const candidatos = await tx.agendamento.findMany({ where: ondeConflito });
+      const conflito = candidatos.some((a) =>
+        intervalosSeSobrepoe(paraMinutos(horaInicio), paraMinutos(horaFim), paraMinutos(a.horaInicio), paraMinutos(a.horaFim))
+      );
 
       if (conflito) {
         const erro = new Error('Novo horário indisponível.');
@@ -179,12 +200,10 @@ async function reagendar(req, res, next) {
         throw erro;
       }
 
-      agendamento.data = data;
-      agendamento.horaInicio = horaInicio;
-      agendamento.horaFim = horaFim;
-      agendamento.status = 'confirmado';
-      agendamento.atualizadoEm = new Date().toISOString();
-      return agendamento;
+      return tx.agendamento.update({
+        where: { id },
+        data: { data, horaInicio, horaFim, status: 'confirmado' },
+      });
     });
 
     return ok(res, resultado, 'Agendamento reagendado.');
@@ -198,12 +217,8 @@ async function reagendar(req, res, next) {
 async function remover(req, res, next) {
   try {
     const { id } = req.params;
-    const dados = db.ler();
-    const indice = dados.agendamentos.findIndex((a) => a.id === id && a.barbeiroId === req.barbeiro.id);
-    if (indice === -1) return notFound(res, 'Agendamento não encontrado.');
-
-    dados.agendamentos.splice(indice, 1);
-    await db.escrever(dados);
+    const { count } = await prisma.agendamento.deleteMany({ where: { id, barbeiroId: req.barbeiro.id } });
+    if (count === 0) return notFound(res, 'Agendamento não encontrado.');
     return ok(res, null, 'Agendamento removido.');
   } catch (err) {
     next(err);

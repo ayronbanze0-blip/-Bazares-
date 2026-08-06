@@ -1,6 +1,5 @@
 const bcrypt = require('bcryptjs');
-const db = require('../config/db');
-const { gerarId } = require('../utils/id');
+const prisma = require('../config/prisma');
 const { gerarToken } = require('../utils/token');
 const { ok, created, fail } = require('../utils/response');
 
@@ -28,6 +27,21 @@ function semSenha(barbeiro) {
   return resto;
 }
 
+/**
+ * Gera um slug único tentando "nome", "nome-1", "nome-2"... Roda dentro de
+ * uma transação com o insert para não haver corrida entre dois registros
+ * simultâneos com o mesmo nome de barbearia.
+ */
+async function gerarSlugUnico(tx, nomeBarbearia) {
+  const slugBase = gerarSlug(nomeBarbearia) || 'barbearia';
+  let slug = slugBase;
+  let tentativa = 1;
+  while (await tx.barbeiro.findUnique({ where: { slug } })) {
+    slug = `${slugBase}-${tentativa++}`;
+  }
+  return slug;
+}
+
 async function registrar(req, res, next) {
   try {
     const { nome, nomeBarbearia, email, senha, telefone } = req.body;
@@ -39,41 +53,27 @@ async function registrar(req, res, next) {
       return fail(res, 'A senha deve ter pelo menos 6 caracteres.', 422);
     }
 
-    const dados = db.ler();
-
     const emailNormalizado = email.trim().toLowerCase();
-    if (dados.barbeiros.some((b) => b.email === emailNormalizado)) {
-      return fail(res, 'Este e-mail já está em uso.', 409);
-    }
-
-    let slugBase = gerarSlug(nomeBarbearia);
-    let slug = slugBase || 'barbearia';
-    let tentativa = 1;
-    while (dados.barbeiros.some((b) => b.slug === slug)) {
-      slug = `${slugBase}-${tentativa++}`;
-    }
+    const existente = await prisma.barbeiro.findUnique({ where: { email: emailNormalizado } });
+    if (existente) return fail(res, 'Este e-mail já está em uso.', 409);
 
     const senhaHash = await bcrypt.hash(senha, 10);
 
-    const novoBarbeiro = {
-      id: gerarId(),
-      nome,
-      nomeBarbearia,
-      slug,
-      email: emailNormalizado,
-      senhaHash,
-      telefone: telefone || '',
-      endereco: '',
-      logoUrl: '',
-      corTema: '#C89B3C',
-      tema: 'escuro',
-      expediente: EXPEDIENTE_PADRAO,
-      config: { intervaloEntreSlots: 15, antecedenciaMinimaMinutos: 60 },
-      criadoEm: new Date().toISOString(),
-    };
-
-    dados.barbeiros.push(novoBarbeiro);
-    await db.escrever(dados);
+    const novoBarbeiro = await prisma.$transaction(async (tx) => {
+      const slug = await gerarSlugUnico(tx, nomeBarbearia);
+      return tx.barbeiro.create({
+        data: {
+          nome,
+          nomeBarbearia,
+          slug,
+          email: emailNormalizado,
+          senhaHash,
+          telefone: telefone || '',
+          expediente: EXPEDIENTE_PADRAO,
+          config: { intervaloEntreSlots: 15, antecedenciaMinimaMinutos: 60 },
+        },
+      });
+    });
 
     const token = gerarToken(novoBarbeiro.id);
     return created(res, { token, barbeiro: semSenha(novoBarbeiro) }, 'Conta criada com sucesso.');
@@ -87,8 +87,7 @@ async function login(req, res, next) {
     const { email, senha } = req.body;
     if (!email || !senha) return fail(res, 'Informe e-mail e senha.', 422);
 
-    const dados = db.ler();
-    const barbeiro = dados.barbeiros.find((b) => b.email === email.trim().toLowerCase());
+    const barbeiro = await prisma.barbeiro.findUnique({ where: { email: email.trim().toLowerCase() } });
     if (!barbeiro) return fail(res, 'E-mail ou senha incorretos.', 401);
 
     const senhaConfere = await bcrypt.compare(senha, barbeiro.senhaHash);
@@ -112,18 +111,19 @@ async function atualizarPerfil(req, res, next) {
       'corTema', 'tema', 'expediente', 'config',
     ];
 
-    const dados = db.ler();
-    const barbeiro = dados.barbeiros.find((b) => b.id === req.barbeiro.id);
-    if (!barbeiro) return fail(res, 'Conta não encontrada.', 404);
-
+    const dadosAtualizados = {};
     for (const campo of camposPermitidos) {
-      if (req.body[campo] !== undefined) barbeiro[campo] = req.body[campo];
+      if (req.body[campo] !== undefined) dadosAtualizados[campo] = req.body[campo];
     }
-    barbeiro.atualizadoEm = new Date().toISOString();
 
-    await db.escrever(dados);
+    const barbeiro = await prisma.barbeiro.update({
+      where: { id: req.barbeiro.id },
+      data: dadosAtualizados,
+    });
+
     return ok(res, semSenha(barbeiro), 'Perfil atualizado.');
   } catch (err) {
+    if (err.code === 'P2025') return fail(res, 'Conta não encontrada.', 404);
     next(err);
   }
 }

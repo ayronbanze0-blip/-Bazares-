@@ -1,5 +1,4 @@
-const db = require('../config/db');
-const { gerarId } = require('../utils/id');
+const prisma = require('../config/prisma');
 const { ok, notFound } = require('../utils/response');
 
 function normalizarTelefone(telefone) {
@@ -9,49 +8,46 @@ function normalizarTelefone(telefone) {
 /**
  * Cria ou atualiza o registro do cliente automaticamente a partir de um agendamento.
  * Um cliente é identificado pelo par (barbeiro + telefone normalizado).
+ * Recebe opcionalmente um `tx` (transação Prisma em andamento) para ficar
+ * atômico junto com a criação do agendamento.
  */
-async function registrarOuAtualizarCliente(barbeiroId, { nome, telefone, email }) {
+async function registrarOuAtualizarCliente(barbeiroId, { nome, telefone, email }, tx = prisma) {
   const telefoneNormalizado = normalizarTelefone(telefone);
   if (!telefoneNormalizado) return null;
 
-  return db.transacao((dados) => {
-    let cliente = dados.clientes.find(
-      (c) => c.barbeiroId === barbeiroId && c.telefone === telefoneNormalizado
-    );
+  const agora = new Date();
 
-    if (!cliente) {
-      cliente = {
-        id: gerarId(),
-        barbeiroId,
-        telefone: telefoneNormalizado,
-        telefoneExibicao: telefone,
-        nome,
-        email: email || '',
-        totalAgendamentos: 1,
-        totalGasto: 0,
-        primeiroAgendamento: new Date().toISOString(),
-        ultimoAgendamento: new Date().toISOString(),
-      };
-      dados.clientes.push(cliente);
-    } else {
-      cliente.nome = nome;
-      cliente.telefoneExibicao = telefone;
-      cliente.email = email || cliente.email || '';
-      cliente.totalAgendamentos += 1;
-      cliente.ultimoAgendamento = new Date().toISOString();
-    }
-
-    return cliente;
+  return tx.cliente.upsert({
+    where: { barbeiroId_telefone: { barbeiroId, telefone: telefoneNormalizado } },
+    update: {
+      nome,
+      telefoneExibicao: telefone,
+      email: email || undefined,
+      totalAgendamentos: { increment: 1 },
+      ultimoAgendamento: agora,
+    },
+    create: {
+      barbeiroId,
+      telefone: telefoneNormalizado,
+      telefoneExibicao: telefone,
+      nome,
+      email: email || '',
+      totalAgendamentos: 1,
+      totalGasto: 0,
+      primeiroAgendamento: agora,
+      ultimoAgendamento: agora,
+    },
   });
 }
 
 async function listar(req, res, next) {
   try {
     const { busca } = req.query;
-    const dados = db.ler();
-    let clientes = dados.clientes
-      .filter((c) => c.barbeiroId === req.barbeiro.id)
-      .sort((a, b) => new Date(b.ultimoAgendamento) - new Date(a.ultimoAgendamento));
+
+    let clientes = await prisma.cliente.findMany({
+      where: { barbeiroId: req.barbeiro.id },
+      orderBy: { ultimoAgendamento: 'desc' },
+    });
 
     if (busca) {
       const termo = busca.toLowerCase();
@@ -75,16 +71,16 @@ async function listar(req, res, next) {
 async function historico(req, res, next) {
   try {
     const telefoneNormalizado = normalizarTelefone(req.params.telefone);
-    const dados = db.ler();
 
-    const cliente = dados.clientes.find(
-      (c) => c.barbeiroId === req.barbeiro.id && c.telefone === telefoneNormalizado
-    );
+    const cliente = await prisma.cliente.findUnique({
+      where: { barbeiroId_telefone: { barbeiroId: req.barbeiro.id, telefone: telefoneNormalizado } },
+    });
     if (!cliente) return notFound(res, 'Cliente não encontrado.');
 
-    const agendamentos = dados.agendamentos
-      .filter((a) => a.barbeiroId === req.barbeiro.id && a.clienteTelefoneNormalizado === telefoneNormalizado)
-      .sort((a, b) => (b.data + b.horaInicio).localeCompare(a.data + a.horaInicio));
+    const agendamentos = await prisma.agendamento.findMany({
+      where: { barbeiroId: req.barbeiro.id, clienteTelefoneNormalizado: telefoneNormalizado },
+      orderBy: [{ data: 'desc' }, { horaInicio: 'desc' }],
+    });
 
     return ok(res, { cliente: { ...cliente, telefone: cliente.telefoneExibicao || cliente.telefone }, agendamentos });
   } catch (err) {
