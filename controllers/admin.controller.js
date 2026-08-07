@@ -9,6 +9,47 @@ function semSenha(admin) {
   return resto;
 }
 
+/**
+ * POST /api/admin/bootstrap — cria a PRIMEIRA conta de administrador.
+ *
+ * Existe para resolver um problema prático: em plataformas como o Render,
+ * o plano gratuito não dá acesso a Shell nem facilidade para rodar um
+ * script de seed pontual. Esta rota permite criar a conta de administrador
+ * fazendo um único pedido HTTP (curl, Postman, ou até a barra de endereço
+ * com um POST via alguma extensão) — sem tocar em variáveis de ambiente.
+ *
+ * Segurança: só funciona enquanto a tabela `administradores` estiver
+ * vazia. Assim que a primeira conta é criada, esta rota passa a responder
+ * sempre 403 — não há como "recriar" nem sobrepor um admin já existente
+ * por aqui. Depois de usar, o login normal (POST /api/admin/login) é o
+ * caminho a partir daí.
+ */
+async function bootstrap(req, res, next) {
+  try {
+    const totalExistente = await prisma.administrador.count();
+    if (totalExistente > 0) {
+      return fail(res, 'Já existe uma conta de administrador. Esta rota só funciona uma vez. Use /api/admin/login.', 403);
+    }
+
+    const { nome, email, senha } = req.body;
+    if (!nome || !email || !senha) return fail(res, 'Informe nome, e-mail e senha.', 422);
+    if (senha.length < 6) return fail(res, 'A senha deve ter pelo menos 6 caracteres.', 422);
+
+    const emailNormalizado = email.trim().toLowerCase();
+    const senhaHash = await bcrypt.hash(senha, 10);
+
+    const admin = await prisma.administrador.create({
+      data: { nome, email: emailNormalizado, senhaHash },
+    });
+
+    const token = gerarTokenAdmin(admin.id);
+    return created(res, { token, admin: semSenha(admin) }, 'Conta de administrador criada. Guarde a senha — esta rota agora está bloqueada.');
+  } catch (err) {
+    if (err.code === 'P2002') return fail(res, 'Este e-mail já está em uso.', 409);
+    next(err);
+  }
+}
+
 /** POST /api/admin/login */
 async function login(req, res, next) {
   try {
@@ -211,7 +252,7 @@ async function atualizarDenuncia(req, res, next) {
 }
 
 module.exports = {
-  login, obterPerfil,
+  login, obterPerfil, bootstrap,
   gerarCodigos, listarCodigos,
   listarBarbearias, confirmarPagamento, suspenderConta,
   listarDenuncias, atualizarDenuncia,
