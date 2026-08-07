@@ -3,6 +3,7 @@ const router = express.Router();
 const controlador = require('../controllers/admin.controller');
 const { verificarAutenticacaoAdmin } = require('../middleware/adminAuth.middleware');
 
+router.post('/bootstrap', controlador.bootstrap);
 router.post('/login', controlador.login);
 
 router.use(verificarAutenticacaoAdmin);
