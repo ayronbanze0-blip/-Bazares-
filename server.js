@@ -16,6 +16,10 @@ const availabilityRoutes = require('./routes/availability.routes');
 const clientsRoutes = require('./routes/clients.routes');
 const reportsRoutes = require('./routes/reports.routes');
 const publicRoutes = require('./routes/public.routes');
+const adminRoutes = require('./routes/admin.routes');
+const billingRoutes = require('./routes/billing.routes');
+const denunciasRoutes = require('./routes/denuncias.routes');
+const { listarBarbearias } = require('./controllers/public.controller');
 
 const app = express();
 
@@ -31,9 +35,13 @@ const limitadorPublico = rateLimit({
   message: { success: false, message: 'Muitas requisições. Tente novamente em instantes.' },
 });
 app.use('/api/public', limitadorPublico);
+app.use('/api/barbearias', limitadorPublico);
+app.use('/api/denuncias', limitadorPublico);
+app.use('/api/admin/login', limitadorPublico);
 
 app.get('/api/saude', (req, res) => res.json({ success: true, servico: 'BarberFlow API', status: 'online' }));
 
+app.get('/api/barbearias', listarBarbearias);
 app.use('/api/auth', authRoutes);
 app.use('/api/servicos', servicesRoutes);
 app.use('/api/funcionarios', funcionariosRoutes);
@@ -42,6 +50,9 @@ app.use('/api/disponibilidade', availabilityRoutes);
 app.use('/api/clientes', clientsRoutes);
 app.use('/api/relatorios', reportsRoutes);
 app.use('/api/public', publicRoutes);
+app.use('/api/admin', adminRoutes);
+app.use('/api/billing', billingRoutes);
+app.use('/api/denuncias', denunciasRoutes);
 
 app.use(rotaNaoEncontrada);
 app.use(tratadorDeErros);
