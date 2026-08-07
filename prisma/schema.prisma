@@ -29,10 +29,16 @@ model Barbeiro {
   logoUrl       String   @default("")
   corTema       String   @default("#C89B3C")
   tema          String   @default("escuro")
+  /// "masculino" (barbearia) ou "feminino" (salão) — escolhido no registro,
+  /// define o intervalo padrão da agenda e a terminologia da interface.
+  tipoSalao     String   @default("masculino")
   /// Objeto com o expediente semanal (segunda..domingo -> {abre, fecha, fechado, pausas})
   expediente    Json
   /// { intervaloEntreSlots, antecedenciaMinimaMinutos }
   config        Json
+  /// Estado da assinatura/billing — ativada por código gerado por um admin.
+  assinaturaAtiva     Boolean   @default(false)
+  assinaturaValidaAte DateTime?
   criadoEm      DateTime @default(now())
   atualizadoEm  DateTime @updatedAt
 
@@ -41,8 +47,63 @@ model Barbeiro {
   agendamentos Agendamento[]
   clientes     Cliente[]
   bloqueios    Bloqueio[]
+  codigosUsados CodigoAtivacao[]
+  denunciasRecebidas Denuncia[]
 
   @@map("barbeiros")
+}
+
+/// Conta de administrador da plataforma — não é dono de barbearia,
+/// gerencia o sistema como um todo (billing, denúncias, etc).
+model Administrador {
+  id           String   @id @default(uuid())
+  nome         String
+  email        String   @unique
+  senhaHash    String
+  criadoEm     DateTime @default(now())
+  atualizadoEm DateTime @updatedAt
+
+  codigosGerados CodigoAtivacao[]
+
+  @@map("administradores")
+}
+
+/// Código de ativação de billing: o admin gera, a barbearia resgata para
+/// desbloquear/renovar a assinatura por um período.
+model CodigoAtivacao {
+  id               String    @id @default(uuid())
+  codigo           String    @unique
+  duracaoDias      Int
+  observacoes      String    @default("")
+  usado            Boolean   @default(false)
+  usadoEm          DateTime?
+  usadoPorId       String?
+  usadoPor         Barbeiro? @relation(fields: [usadoPorId], references: [id], onDelete: SetNull)
+  criadoPorAdminId String
+  criadoPorAdmin   Administrador @relation(fields: [criadoPorAdminId], references: [id], onDelete: Cascade)
+  criadoEm         DateTime  @default(now())
+
+  @@index([usadoPorId])
+  @@map("codigos_ativacao")
+}
+
+/// Denúncia recebida sobre uma barbearia (ou de forma geral, sem alvo).
+model Denuncia {
+  id                  String    @id @default(uuid())
+  barbeiroId          String?
+  barbeiro            Barbeiro? @relation(fields: [barbeiroId], references: [id], onDelete: SetNull)
+  nomeDenunciante     String    @default("")
+  contactoDenunciante String    @default("")
+  motivo              String
+  mensagem            String
+  status              String    @default("pendente") // pendente | em_analise | resolvida | arquivada
+  notaAdmin           String    @default("")
+  criadoEm            DateTime  @default(now())
+  atualizadoEm        DateTime  @updatedAt
+
+  @@index([barbeiroId])
+  @@index([status])
+  @@map("denuncias")
 }
 
 /// Profissional que trabalha na barbearia.
