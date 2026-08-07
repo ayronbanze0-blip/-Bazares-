@@ -8,8 +8,12 @@ function gerarToken(barbeiroId) {
   return jwt.sign({ uid: barbeiroId }, SEGREDO, { expiresIn: VALIDADE });
 }
 
+function gerarTokenAdmin(adminId) {
+  return jwt.sign({ uid: adminId, papel: 'admin' }, SEGREDO, { expiresIn: VALIDADE });
+}
+
 function verificarToken(token) {
   return jwt.verify(token, SEGREDO); // lança erro se inválido/expirado
 }
 
-module.exports = { gerarToken, verificarToken };
+module.exports = { gerarToken, gerarTokenAdmin, verificarToken };
