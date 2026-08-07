@@ -4,6 +4,7 @@ const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
 const rateLimit = require('express-rate-limit');
+const bcrypt = require('bcryptjs');
 
 const prisma = require('./config/prisma');
 const { rotaNaoEncontrada, tratadorDeErros } = require('./middleware/error.middleware');
@@ -38,6 +39,7 @@ app.use('/api/public', limitadorPublico);
 app.use('/api/barbearias', limitadorPublico);
 app.use('/api/denuncias', limitadorPublico);
 app.use('/api/admin/login', limitadorPublico);
+app.use('/api/admin/bootstrap', limitadorPublico);
 
 app.get('/api/saude', (req, res) => res.json({ success: true, servico: 'BarberFlow API', status: 'online' }));
 
@@ -57,9 +59,42 @@ app.use('/api/denuncias', denunciasRoutes);
 app.use(rotaNaoEncontrada);
 app.use(tratadorDeErros);
 
+/**
+ * Garante que existe pelo menos uma conta de administrador ao iniciar o
+ * servidor. Criado para plataformas como o Render (plano gratuito), onde
+ * não há Shell nem forma fácil de rodar um script pontual — assim a conta
+ * é criada sozinha no primeiro deploy, direto no arranque do processo.
+ *
+ * É seguro rodar isto em todo restart/deploy: só cria a conta se a tabela
+ * `administradores` estiver vazia. Depois da primeira vez, esta função só
+ * confirma que já existe e não faz mais nada.
+ *
+ * IMPORTANTE: as credenciais abaixo estão fixas no código só para permitir
+ * este primeiro acesso. Depois de conseguires entrar no painel, troque a
+ * senha (ou pelo menos remova este bloco) para não ficar com uma senha
+ * previsível no repositório.
+ */
+async function garantirAdminInicial() {
+  try {
+    const totalExistente = await prisma.administrador.count();
+    if (totalExistente > 0) return;
+
+    const nome = 'Admin';
+    const email = 'admin@gmail.com';
+    const senha = '4evermine';
+    const senhaHash = await bcrypt.hash(senha, 10);
+
+    await prisma.administrador.create({ data: { nome, email, senhaHash } });
+    console.log(`✅ Conta de administrador inicial criada (email: ${email}). Troque a senha após o primeiro login.`);
+  } catch (err) {
+    console.error('⚠️  Não foi possível garantir a conta de administrador inicial:', err.message);
+  }
+}
+
 const PORTA = process.env.PORT || 4000;
 const servidor = app.listen(PORTA, () => {
   console.log(`✂️  BarberFlow API rodando em http://localhost:${PORTA}`);
+  garantirAdminInicial();
 });
 
 // Encerra a conexão com o banco de forma limpa ao desligar o processo
