@@ -105,14 +105,27 @@ async function listar(req, res, next) {
 async function criarManual(req, res, next) {
   try {
     const barbeiroId = req.barbeiro.id;
-    const { clienteNome, clienteTelefone, clienteEmail, servicoId, data, horaInicio, observacoes, funcionarioId } = req.body;
+    const { clienteNome, clienteTelefone, clienteEmail, servicoId, descricaoServico, preco, data, horaInicio, observacoes, funcionarioId } = req.body;
 
-    if (!clienteNome || !clienteTelefone || !servicoId || !data || !horaInicio) {
-      return fail(res, 'Preencha cliente, serviço, data e horário.', 422);
+    if (!clienteNome || !clienteTelefone || (!servicoId && !descricaoServico) || !data || !horaInicio) {
+      return fail(res, 'Preencha cliente, o que vai fazer, data e horário.', 422);
     }
 
-    const servico = await prisma.servico.findFirst({ where: { id: servicoId, barbeiroId } });
-    if (!servico) return notFound(res, 'Serviço não encontrado.');
+    // Serviço pré-cadastrado (grelha) OU descrição livre escrita pelo barbeiro
+    // (quando não há serviços cadastrados) — nesse caso o preço é escolhido
+    // manualmente pelo barbeiro, já que não há tabela de preços a consultar.
+    let servico = null;
+    if (servicoId) {
+      servico = await prisma.servico.findFirst({ where: { id: servicoId, barbeiroId } });
+      if (!servico) return notFound(res, 'Serviço não encontrado.');
+    } else if (preco == null || Number(preco) < 0) {
+      return fail(res, 'Informe o preço deste atendimento.', 422);
+    }
+
+    const barbeiroConfig = req.barbeiro.config;
+    const duracaoMinutos = servico ? servico.duracaoMinutos : (barbeiroConfig?.duracaoPadraoMinutos || barbeiroConfig?.intervaloEntreSlots || 30);
+    const precoFinal = servico ? servico.preco : Number(preco);
+    const servicoNome = servico ? servico.nome : descricaoServico;
 
     let funcionarioNome = null;
     if (funcionarioId) {
@@ -121,19 +134,19 @@ async function criarManual(req, res, next) {
       funcionarioNome = funcionario.nome;
     }
 
-    const horaFim = paraHHmm(paraMinutos(horaInicio) + servico.duracaoMinutos);
+    const horaFim = paraHHmm(paraMinutos(horaInicio) + duracaoMinutos);
 
     const novo = {
       clienteNome,
       clienteTelefone,
       clienteTelefoneNormalizado: normalizarTelefone(clienteTelefone),
       clienteEmail: clienteEmail || '',
-      servicoId,
-      servicoNome: servico.nome,
+      servicoId: servicoId || null,
+      servicoNome,
       funcionarioId: funcionarioId || null,
       funcionarioNome,
-      preco: servico.preco,
-      duracaoMinutos: servico.duracaoMinutos,
+      preco: precoFinal,
+      duracaoMinutos,
       data, horaInicio, horaFim,
       status: 'confirmado',
       observacoes: observacoes || '',

@@ -44,7 +44,7 @@ async function gerarSlugUnico(tx, nomeBarbearia) {
 
 async function registrar(req, res, next) {
   try {
-    const { nome, nomeBarbearia, email, senha, telefone } = req.body;
+    const { nome, nomeBarbearia, email, senha, telefone, tipoSalao } = req.body;
 
     if (!nome || !nomeBarbearia || !email || !senha) {
       return fail(res, 'Preencha nome, nome da barbearia, e-mail e senha.', 422);
@@ -52,12 +52,19 @@ async function registrar(req, res, next) {
     if (senha.length < 6) {
       return fail(res, 'A senha deve ter pelo menos 6 caracteres.', 422);
     }
+    const tipoSalaoValido = ['masculino', 'feminino'].includes(tipoSalao) ? tipoSalao : 'masculino';
 
     const emailNormalizado = email.trim().toLowerCase();
     const existente = await prisma.barbeiro.findUnique({ where: { email: emailNormalizado } });
     if (existente) return fail(res, 'Este e-mail já está em uso.', 409);
 
     const senhaHash = await bcrypt.hash(senha, 10);
+
+    // Salões femininos costumam ter serviços mais longos (coloração, tranças,
+    // alisamento) do que um corte masculino — por isso o intervalo padrão da
+    // grade de horários já nasce maior. Ambos continuam 100% ajustáveis depois
+    // em Configurações.
+    const intervaloPadrao = tipoSalaoValido === 'feminino' ? 30 : 15;
 
     const novoBarbeiro = await prisma.$transaction(async (tx) => {
       const slug = await gerarSlugUnico(tx, nomeBarbearia);
@@ -69,8 +76,9 @@ async function registrar(req, res, next) {
           email: emailNormalizado,
           senhaHash,
           telefone: telefone || '',
+          tipoSalao: tipoSalaoValido,
           expediente: EXPEDIENTE_PADRAO,
-          config: { intervaloEntreSlots: 15, antecedenciaMinimaMinutos: 60 },
+          config: { intervaloEntreSlots: intervaloPadrao, antecedenciaMinimaMinutos: 60 },
         },
       });
     });
@@ -108,12 +116,15 @@ async function atualizarPerfil(req, res, next) {
   try {
     const camposPermitidos = [
       'nome', 'nomeBarbearia', 'telefone', 'endereco', 'logoUrl',
-      'corTema', 'tema', 'expediente', 'config',
+      'corTema', 'tema', 'tipoSalao', 'expediente', 'config',
     ];
 
     const dadosAtualizados = {};
     for (const campo of camposPermitidos) {
       if (req.body[campo] !== undefined) dadosAtualizados[campo] = req.body[campo];
+    }
+    if (dadosAtualizados.tipoSalao && !['masculino', 'feminino'].includes(dadosAtualizados.tipoSalao)) {
+      return fail(res, 'Tipo de salão inválido.', 422);
     }
 
     const barbeiro = await prisma.barbeiro.update({

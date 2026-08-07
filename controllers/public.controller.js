@@ -42,11 +42,39 @@ function expedienteDoDia(barbeiro, funcionario, dataISO) {
   return barbeiro.expediente?.[diaSemana] || null;
 }
 
+/** GET /api/barbearias — diretório público (página "encontrar", sem link direto) */
+async function listarBarbearias(req, res, next) {
+  try {
+    const barbearias = await prisma.barbeiro.findMany({
+      where: {
+        assinaturaAtiva: true,
+        OR: [{ assinaturaValidaAte: null }, { assinaturaValidaAte: { gt: new Date() } }],
+      },
+      select: {
+        slug: true,
+        nomeBarbearia: true,
+        endereco: true,
+        logoUrl: true,
+        corTema: true,
+      },
+      orderBy: { nomeBarbearia: 'asc' },
+    });
+    return ok(res, barbearias, 'Barbearias carregadas.');
+  } catch (err) {
+    next(err);
+  }
+}
+
 /** GET /api/public/:slug — dados públicos da barbearia + serviços ativos + equipe */
 async function obterBarbearia(req, res, next) {
   try {
     const barbeiro = await buscarBarbeiroPorSlug(req.params.slug);
     if (!barbeiro) return notFound(res, 'Barbearia não encontrada.');
+
+    const assinaturaExpirada = barbeiro.assinaturaValidaAte && new Date(barbeiro.assinaturaValidaAte) < new Date();
+    if (!barbeiro.assinaturaAtiva || assinaturaExpirada) {
+      return fail(res, 'Esta barbearia está temporariamente indisponível para agendamentos.', 402);
+    }
 
     const [servicos, funcionarios] = await Promise.all([
       prisma.servico.findMany({ where: { barbeiroId: barbeiro.id, ativo: true }, orderBy: { ordem: 'asc' } }),
@@ -56,6 +84,7 @@ async function obterBarbearia(req, res, next) {
     return ok(res, {
       nomeBarbearia: barbeiro.nomeBarbearia,
       slug: barbeiro.slug,
+      tipoSalao: barbeiro.tipoSalao || 'masculino',
       endereco: barbeiro.endereco,
       telefone: barbeiro.telefone,
       logoUrl: barbeiro.logoUrl,
@@ -127,10 +156,10 @@ async function obterHorariosDisponiveis(req, res, next) {
 /** POST /api/public/:slug/agendar */
 async function criarAgendamentoPublico(req, res, next) {
   try {
-    const { nome, telefone, observacoes, servicoId, data, horaInicio, funcionarioId } = req.body;
+    const { nome, telefone, observacoes, servicoId, descricaoServico, data, horaInicio, funcionarioId } = req.body;
 
-    if (!nome || !telefone || !servicoId || !data || !horaInicio) {
-      return fail(res, 'Preencha nome, telefone, serviço, data e horário.', 422);
+    if (!nome || !telefone || (!servicoId && !descricaoServico) || !data || !horaInicio) {
+      return fail(res, 'Preencha nome, telefone, o que deseja, data e horário.', 422);
     }
     if (normalizarTelefone(telefone).length < 9) {
       return fail(res, 'Informe um número de telefone válido.', 422);
@@ -141,15 +170,28 @@ async function criarAgendamentoPublico(req, res, next) {
 
     const barbeiro = await buscarBarbeiroPorSlug(req.params.slug);
     if (!barbeiro) return notFound(res, 'Barbearia não encontrada.');
+    const assinaturaExpirada = barbeiro.assinaturaValidaAte && new Date(barbeiro.assinaturaValidaAte) < new Date();
+    if (!barbeiro.assinaturaAtiva || assinaturaExpirada) {
+      return fail(res, 'Esta barbearia está temporariamente indisponível para agendamentos.', 402);
+    }
 
-    const servico = await prisma.servico.findFirst({ where: { id: servicoId, barbeiroId: barbeiro.id } });
-    if (!servico) return notFound(res, 'Serviço não encontrado.');
+    // Serviço pré-cadastrado (fluxo antigo) OU descrição livre digitada pelo
+    // cliente (fluxo atual): sem preço/duração conhecidos, a barbearia ajusta
+    // isso manualmente no painel depois de ler o pedido.
+    let servico = null;
+    if (servicoId) {
+      servico = await prisma.servico.findFirst({ where: { id: servicoId, barbeiroId: barbeiro.id } });
+      if (!servico) return notFound(res, 'Serviço não encontrado.');
+    }
+    const duracaoMinutos = servico ? servico.duracaoMinutos : (barbeiro.config?.duracaoPadraoMinutos || barbeiro.config?.intervaloEntreSlots || 30);
+    const preco = servico ? servico.preco : 0;
+    const servicoNome = servico ? servico.nome : descricaoServico;
 
     let funcionario = null;
     if (funcionarioId) {
       funcionario = await prisma.funcionario.findFirst({ where: { id: funcionarioId, barbeiroId: barbeiro.id, ativo: true } });
       if (!funcionario) return notFound(res, 'Profissional não encontrado.');
-      if (servico.funcionarioId && servico.funcionarioId !== funcionarioId) {
+      if (servico && servico.funcionarioId && servico.funcionarioId !== funcionarioId) {
         return fail(res, 'Este serviço não está disponível com o profissional selecionado.', 422);
       }
     }
@@ -160,7 +202,7 @@ async function criarAgendamentoPublico(req, res, next) {
       return fail(res, 'Fora do horário de funcionamento nesta data.', 422);
     }
 
-    const horaFim = paraHHmm(paraMinutos(horaInicio) + servico.duracaoMinutos);
+    const horaFim = paraHHmm(paraMinutos(horaInicio) + duracaoMinutos);
 
     const dentroDoExpediente = paraMinutos(horaInicio) >= paraMinutos(expedienteHoje.abre)
       && paraMinutos(horaFim) <= paraMinutos(expedienteHoje.fecha);
@@ -173,12 +215,12 @@ async function criarAgendamentoPublico(req, res, next) {
       clienteTelefone: telefone,
       clienteTelefoneNormalizado: normalizarTelefone(telefone),
       clienteEmail: '',
-      servicoId,
-      servicoNome: servico.nome,
+      servicoId: servicoId || null,
+      servicoNome,
       funcionarioId: funcionarioId || null,
       funcionarioNome: funcionario ? funcionario.nome : null,
-      preco: servico.preco,
-      duracaoMinutos: servico.duracaoMinutos,
+      preco,
+      duracaoMinutos,
       data, horaInicio, horaFim,
       status: 'pendente',
       observacoes: observacoes || '',
@@ -199,4 +241,4 @@ async function criarAgendamentoPublico(req, res, next) {
   }
 }
 
-module.exports = { obterBarbearia, obterHorariosDisponiveis, criarAgendamentoPublico };
+module.exports = { listarBarbearias, obterBarbearia, obterHorariosDisponiveis, criarAgendamentoPublico };
