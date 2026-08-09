@@ -9,6 +9,49 @@ const { normalizarTelefone, registrarOuAtualizarCliente } = require('./clients.c
 const STATUS_OCUPA_HORARIO = ['pendente', 'confirmado', 'concluido'];
 
 /**
+ * Códigos de erro do Postgres/Prisma que indicam que a transação perdeu a
+ * corrida por causa do nível SERIALIZABLE (outra transação concorrente
+ * mexeu nos mesmos dados primeiro). Não é um erro de verdade — é o sinal
+ * para tentar de novo.
+ */
+const CODIGOS_CONFLITO_SERIALIZACAO = ['P2034', '40001'];
+
+function ehErroDeSerializacao(err) {
+  return CODIGOS_CONFLITO_SERIALIZACAO.includes(err.code)
+    || (typeof err.message === 'string' && err.message.includes('could not serialize access'));
+}
+
+/**
+ * Executa uma transação Prisma no nível SERIALIZABLE, a única forma de
+ * garantir — a nível de banco — que dois clientes não consigam reservar o
+ * mesmo horário mesmo clicando ao mesmo tempo.
+ *
+ * Sem isso, duas transações concorrentes no nível padrão (READ COMMITTED)
+ * podiam AMBAS ler "sem conflito" antes de qualquer uma delas gravar o
+ * agendamento, e as duas conseguiam criar reservas sobrepostas.
+ *
+ * Em SERIALIZABLE, o Postgres detecta a corrida e derruba uma das duas
+ * transações com erro de serialização — por isso tentamos de novo algumas
+ * vezes automaticamente (é o padrão recomendado para esse nível de
+ * isolamento: o "perdedor" repete a operação do zero).
+ */
+async function executarComRetry(fn, tentativas = 3) {
+  for (let tentativa = 1; tentativa <= tentativas; tentativa++) {
+    try {
+      return await prisma.$transaction(fn, { isolationLevel: 'Serializable' });
+    } catch (err) {
+      if (ehErroDeSerializacao(err) && tentativa < tentativas) {
+        // Pequeno atraso aleatório antes de tentar de novo, para não bater
+        // exatamente ao mesmo tempo outra vez.
+        await new Promise((r) => setTimeout(r, 30 + Math.random() * 70));
+        continue;
+      }
+      throw err;
+    }
+  }
+}
+
+/**
  * Retorna todos os intervalos já ocupados numa data para um barbeiro:
  * agendamentos ativos + bloqueios manuais (incluindo recorrentes que caem no dia).
  *
@@ -44,28 +87,37 @@ async function obterIntervalosOcupados(barbeiroId, dataISO, funcionarioId = null
  * reservar o mesmo horário ao mesmo tempo.
  */
 async function criarAgendamentoSeguro(barbeiroId, dadosAgendamento) {
-  return prisma.$transaction(async (tx) => {
-    const { data, horaInicio, horaFim, funcionarioId } = dadosAgendamento;
+  try {
+    return await executarComRetry(async (tx) => {
+      const { data, horaInicio, horaFim, funcionarioId } = dadosAgendamento;
 
-    const ondeConflito = { barbeiroId, data, status: { in: STATUS_OCUPA_HORARIO } };
-    if (funcionarioId) ondeConflito.funcionarioId = funcionarioId;
+      const ondeConflito = { barbeiroId, data, status: { in: STATUS_OCUPA_HORARIO } };
+      if (funcionarioId) ondeConflito.funcionarioId = funcionarioId;
 
-    const candidatos = await tx.agendamento.findMany({ where: ondeConflito });
-    const conflito = candidatos.some((a) =>
-      intervalosSeSobrepoe(
-        paraMinutos(horaInicio), paraMinutos(horaFim),
-        paraMinutos(a.horaInicio), paraMinutos(a.horaFim)
-      )
-    );
+      const candidatos = await tx.agendamento.findMany({ where: ondeConflito });
+      const conflito = candidatos.some((a) =>
+        intervalosSeSobrepoe(
+          paraMinutos(horaInicio), paraMinutos(horaFim),
+          paraMinutos(a.horaInicio), paraMinutos(a.horaFim)
+        )
+      );
 
-    if (conflito) {
+      if (conflito) {
+        const erro = new Error('Este horário acabou de ser reservado. Escolha outro horário.');
+        erro.status = 409;
+        throw erro;
+      }
+
+      return tx.agendamento.create({ data: { barbeiroId, ...dadosAgendamento } });
+    });
+  } catch (err) {
+    if (ehErroDeSerializacao(err)) {
       const erro = new Error('Este horário acabou de ser reservado. Escolha outro horário.');
       erro.status = 409;
       throw erro;
     }
-
-    return tx.agendamento.create({ data: { barbeiroId, ...dadosAgendamento } });
-  });
+    throw err;
+  }
 }
 
 async function listar(req, res, next) {
@@ -189,7 +241,7 @@ async function reagendar(req, res, next) {
     const { data, horaInicio } = req.body;
     if (!data || !horaInicio) return fail(res, 'Informe nova data e horário.', 422);
 
-    const resultado = await prisma.$transaction(async (tx) => {
+    const resultado = await executarComRetry(async (tx) => {
       const agendamento = await tx.agendamento.findFirst({ where: { id, barbeiroId: req.barbeiro.id } });
       if (!agendamento) {
         const erro = new Error('Agendamento não encontrado.');
@@ -223,6 +275,7 @@ async function reagendar(req, res, next) {
   } catch (err) {
     if (err.status === 404) return notFound(res, err.message);
     if (err.status === 409) return fail(res, err.message, 409);
+    if (ehErroDeSerializacao(err)) return fail(res, 'Novo horário indisponível.', 409);
     next(err);
   }
 }
