@@ -41,6 +41,16 @@ app.use('/api/denuncias', limitadorPublico);
 app.use('/api/admin/login', limitadorPublico);
 app.use('/api/admin/bootstrap', limitadorPublico);
 
+// Login/registro de barbearia: mais apertado que o limite público geral,
+// para dificultar brute-force de senha sem incomodar uso normal.
+const limitadorAuth = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  message: { success: false, message: 'Muitas tentativas. Aguarde alguns minutos e tente novamente.' },
+});
+app.use('/api/auth/login', limitadorAuth);
+app.use('/api/auth/registrar', limitadorAuth);
+
 app.get('/api/saude', (req, res) => res.json({ success: true, servico: 'BarberFlow API', status: 'online' }));
 
 app.get('/api/barbearias', listarBarbearias);
